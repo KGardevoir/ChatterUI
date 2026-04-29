@@ -1,6 +1,6 @@
 import * as Speech from 'expo-speech'
 import { useEffect, useState } from 'react'
-import { View } from 'react-native'
+import { Platform, Text, View } from 'react-native'
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller'
 
 import ThemedButton from '@components/buttons/ThemedButton'
@@ -14,6 +14,16 @@ import { Logger } from '@lib/state/Logger'
 import { useTTS } from '@lib/state/TTS'
 import { Theme } from '@lib/theme/ThemeManager'
 import { groupBy } from '@lib/utils/Array'
+
+const formatVoiceLabel = (item: Speech.Voice): string => {
+    // Prefer the human-readable name; strip any package-name prefix from the identifier as fallback
+    const baseName =
+        item.name && item.name !== item.identifier
+            ? item.name
+            : item.identifier.replace(/^[^:]+:/, '')
+    // ★ marks Enhanced (neural) quality voices
+    return item.quality === 'Enhanced' ? `${baseName} ★` : baseName
+}
 
 type LanguageListItem = {
     [key: string]: Speech.Voice[]
@@ -71,7 +81,7 @@ const TTSManagerScreen = () => {
                     }
                     setAuto(value)
                 }}
-                label="Automatically TTS After Inference"
+                label="Read Aloud After Reply"
             />
 
             <ThemedSwitch
@@ -82,7 +92,7 @@ const TTSManagerScreen = () => {
                     }
                     setLive(value)
                 }}
-                label="Automatically TTS During Inference"
+                label="Read Aloud While Generating"
             />
 
             <ThemedSlider
@@ -119,6 +129,9 @@ const TTSManagerScreen = () => {
 
             <SectionTitle style={{ marginTop: 8 }}>
                 Voices ({modelList.filter((item) => item.language === lang).length})
+                {modelList.filter((item) => item.language === lang && item.quality === 'Enhanced').length > 0
+                    ? '  ★ = Enhanced / Neural'
+                    : ''}
             </SectionTitle>
 
             <DropdownSheet
@@ -127,10 +140,24 @@ const TTSManagerScreen = () => {
                 modalTitle="Select Voice"
                 selected={voice}
                 data={languageList?.[lang] ?? []}
-                labelExtractor={(item) => item.identifier}
+                labelExtractor={formatVoiceLabel}
                 placeholder="Select Voice"
                 onChangeValue={(item) => setVoice(item)}
             />
+
+            {Platform.OS === 'android' && (
+                <Text
+                    style={{
+                        color: color.text._300,
+                        fontSize: 12,
+                        marginBottom: 4,
+                        lineHeight: 18,
+                    }}>
+                    To get more or higher-quality voices, open your device Settings → General
+                    Management → Text-to-speech and install additional voice data (e.g. Google
+                    Text-to-speech enhanced voices). New voices appear here after reloading.
+                </Text>
+            )}
             <View
                 style={{
                     flexDirection: 'row',

@@ -130,17 +130,23 @@ export const useTTSStore = create<TTSState>()(
                     clearIndex()
                     return
                 }
+                // Strip thinking/reasoning sections before speaking
+                const strippedText = stripThinkTags(text).trim()
+                if (!strippedText) {
+                    clearIndex()
+                    return
+                }
                 if (await Speech.isSpeakingAsync()) await Speech.stop()
                 const filter = /([。…！？、!?.,*"])/
                 const filteredchunks: string[] = []
-                const chunks = text.split(filter)
+                const chunks = strippedText.split(filter)
                 chunks.forEach((item, index) => {
                     if (!filter.test(item) && item) return filteredchunks.push(item)
                     if (index > 0)
                         filteredchunks[filteredchunks.length - 1] =
                             filteredchunks[filteredchunks.length - 1] + item
                 })
-                if (filteredchunks.length === 0) filteredchunks.push(text)
+                if (filteredchunks.length === 0) filteredchunks.push(strippedText)
 
                 const cleanedchunks = filteredchunks.map((item) =>
                     item.replaceAll(/[*"]/g, '').trim()
@@ -219,10 +225,16 @@ export const useTTSStore = create<TTSState>()(
                 const buffer = get().buffer
 
                 if (!get().pauseLive && buffer.trim()) {
-                    const clean = cleanMarkdown(buffer)
+                    // Strip complete think sections, then truncate at any remaining open tag
+                    let stripped = stripThinkTags(buffer)
+                    const openIdx = findOpenThinkTag(stripped)
+                    if (openIdx !== -1) stripped = stripped.slice(0, openIdx)
+                    const clean = cleanMarkdown(stripped).trim()
                     if (clean) {
                         set({ activeChatIndex: lastIndex })
                         get().speak(clean, () => set({ activeChatIndex: undefined }))
+                    } else {
+                        set({ activeChatIndex: undefined })
                     }
                 } else {
                     set({ activeChatIndex: undefined })
@@ -234,24 +246,40 @@ export const useTTSStore = create<TTSState>()(
             },
             insertBuffer: (text: string) => {
                 if (!get().enabled || !get().liveTTS || get().pauseLive) return
-                const newBuffer = get().buffer + text
+                let newBuffer = get().buffer + text
+
+                // Remove complete think sections from the accumulated buffer
+                newBuffer = stripThinkTags(newBuffer)
+
+                // If an unclosed think-tag opening remains, only process text before it
+                // and keep everything from that opening tag onwards for later
+                const openIdx = findOpenThinkTag(newBuffer)
+                let processable: string
+                let holdback: string
+                if (openIdx !== -1) {
+                    processable = newBuffer.slice(0, openIdx)
+                    holdback = newBuffer.slice(openIdx)
+                } else {
+                    processable = newBuffer
+                    holdback = ''
+                }
 
                 let lastMatchIndex = -1
 
-                while (sentenceEndRegex.exec(newBuffer) !== null) {
+                while (sentenceEndRegex.exec(processable) !== null) {
                     lastMatchIndex = sentenceEndRegex.lastIndex
                 }
 
                 if (lastMatchIndex !== -1) {
-                    const fullSentence = newBuffer.slice(0, lastMatchIndex).trim()
-                    const remainder = newBuffer.slice(lastMatchIndex)
+                    const fullSentence = processable.slice(0, lastMatchIndex).trim()
+                    const remainder = processable.slice(lastMatchIndex)
                     const clean = cleanMarkdown(fullSentence)
                     if (clean) {
                         get().speak(clean)
                     }
-                    set({ buffer: remainder })
+                    set({ buffer: remainder + holdback })
                 } else {
-                    set({ buffer: newBuffer })
+                    set({ buffer: processable + holdback })
                 }
             },
         }),
@@ -269,6 +297,21 @@ export const useTTSStore = create<TTSState>()(
         }
     )
 )
+
+// Removes complete <think>, <|channel>thought, and <seed:think> sections including their content
+const stripThinkTags = (text: string): string => {
+    let result = text
+    result = result.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '')
+    result = result.replace(/<\|channel>thought[\s\S]*?<channel\|>/g, '')
+    result = result.replace(/<seed:think>[\s\S]*?<\/seed:think>/gi, '')
+    return result
+}
+
+// Returns the index of the first unclosed think-tag opening, or -1 if none
+const findOpenThinkTag = (text: string): number => {
+    const match = /(<think\b[^>]*>|<\|channel>thought|<seed:think>)/i.exec(text)
+    return match ? match.index : -1
+}
 
 const cleanMarkdown = (text: string): string => {
     const result = text.replace(/([*_]{1,2}|`|\[\^.*?\]\(.*?\)|<\/?[^>]+>)/g, '')
