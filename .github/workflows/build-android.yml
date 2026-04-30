@@ -1,0 +1,152 @@
+name: Build Android APK
+
+on:
+    push:
+        branches: [master, dev]
+        tags: ['v*']
+        paths-ignore:
+            - 'README.md'
+            - '.github/ISSUE_TEMPLATE/**'
+    pull_request:
+        branches: [master, dev]
+        paths-ignore:
+            - 'README.md'
+            - '.github/ISSUE_TEMPLATE/**'
+    workflow_dispatch:
+        inputs:
+            create_release:
+                description: 'Create a GitHub Release from this build'
+                type: boolean
+                default: false
+
+# Cancel in-progress builds when new commits arrive on the same PR or branch
+concurrency:
+    group: android-build-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build:
+        name: Build APK
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+                  cache: 'npm'
+
+            - name: Setup JDK 17
+              uses: actions/setup-java@v4
+              with:
+                  distribution: 'temurin'
+                  java-version: '17'
+
+            - name: Setup Android SDK
+              uses: android-actions/setup-android@v3
+
+            # cui-llama.rn compiles llama.cpp via CMake during the Gradle build
+            - name: Install Android NDK and CMake
+              run: |
+                  sdkmanager "ndk;27.2.12479018" "cmake;3.22.1"
+
+            - name: Cache Gradle
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.gradle/caches
+                      ~/.gradle/wrapper
+                  key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+                  restore-keys: |
+                      gradle-${{ runner.os }}-
+
+            # Keep JVM heap modest so the OS and CMake/NDK native compilation
+            # (which runs outside the JVM) have enough RAM on the 7 GB runner.
+            # llama.cpp compilation is the memory bottleneck, not Gradle itself.
+            - name: Configure Gradle JVM memory
+              run: |
+                  mkdir -p ~/.gradle
+                  cat >> ~/.gradle/gradle.properties <<'EOF'
+                  org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError
+                  org.gradle.parallel=true
+                  org.gradle.configureondemand=true
+                  EOF
+
+            - name: Install npm dependencies
+              run: npm ci
+
+            # expo prebuild generates a fresh android/ directory from the config
+            - name: Prebuild Android
+              run: npx expo prebuild --clean --platform android
+              env:
+                  NODE_ENV: production
+
+            - name: Decode signing keystore
+              run: |
+                  echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > "${{ github.workspace }}/release.keystore"
+
+            # @vali98/* packages don't declare generateCodegenArtifactsFromSchema as a
+            # dependency of the app's CMake step, so on a clean npm ci the JNI directories
+            # are missing and CMake fails with "not an existing directory".
+            # Discover the exact Gradle project names dynamically (scoped npm packages
+            # like @vali98/foo may be registered under various names depending on the
+            # autolinking plugin version) and run all non-app codegen tasks up front.
+            - name: Generate codegen artifacts for native modules
+              run: |
+                  cd android
+                  TASKS=$(./gradlew tasks --all 2>/dev/null \
+                    | grep ':generateCodegenArtifactsFromSchema' \
+                    | awk '{print $1}' \
+                    | grep -v '^:app:' \
+                    | tr '\n' ' ')
+                  if [ -n "$TASKS" ]; then
+                    echo "Pre-running codegen: $TASKS"
+                    # shellcheck disable=SC2086
+                    ./gradlew $TASKS -PreactNativeArchitectures=arm64-v8a
+                  fi
+
+            - name: Build release APK (arm64-v8a)
+              run: |
+                  cd android && ./gradlew assembleRelease \
+                    -PreactNativeArchitectures=arm64-v8a \
+                    -Pandroid.injected.signing.store.file="${{ github.workspace }}/release.keystore" \
+                    -Pandroid.injected.signing.store.password="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+                    -Pandroid.injected.signing.key.alias="${{ secrets.ANDROID_KEY_ALIAS }}" \
+                    -Pandroid.injected.signing.key.password="${{ secrets.ANDROID_KEY_PASSWORD }}"
+
+            - name: Resolve version and name APK
+              id: meta
+              run: |
+                  VERSION=$(node -e "console.log(require('./app.config.js').expo.version)")
+                  COMMIT=$(git rev-parse --short HEAD)
+                  APK_SRC=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
+                  if [[ -n "${{ github.event.pull_request.number }}" ]]; then
+                    APK_NAME="chatterui-pr${{ github.event.pull_request.number }}-${COMMIT}.apk"
+                  else
+                    APK_NAME="chatterui-${VERSION}-${COMMIT}.apk"
+                  fi
+                  cp "$APK_SRC" "$APK_NAME"
+                  echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
+                  echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+
+            - name: Upload APK artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ steps.meta.outputs.apk_name }}
+                  path: ${{ steps.meta.outputs.apk_name }}
+                  retention-days: 30
+
+            # Publish a release when a version tag is pushed (e.g. git tag v0.9.1 && git push --tags)
+            # or when manually triggered with create_release=true
+            - name: Create GitHub Release
+              if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.meta.outputs.version) }}
+                  name: ChatterUI ${{ steps.meta.outputs.version }}
+                  files: ${{ steps.meta.outputs.apk_name }}
+                  generate_release_notes: true
+                  make_latest: ${{ startsWith(github.ref, 'refs/tags/v') }}
