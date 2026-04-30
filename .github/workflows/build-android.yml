@@ -7,6 +7,11 @@ on:
         paths-ignore:
             - 'README.md'
             - '.github/ISSUE_TEMPLATE/**'
+    pull_request:
+        branches: [master, dev]
+        paths-ignore:
+            - 'README.md'
+            - '.github/ISSUE_TEMPLATE/**'
     workflow_dispatch:
         inputs:
             create_release:
@@ -14,9 +19,9 @@ on:
                 type: boolean
                 default: false
 
-# Cancel in-progress builds on the same ref so pushes don't queue up
+# Cancel in-progress builds when new commits arrive on the same PR or branch
 concurrency:
-    group: android-build-${{ github.ref }}
+    group: android-build-${{ github.event.pull_request.number || github.ref }}
     cancel-in-progress: true
 
 jobs:
@@ -95,7 +100,11 @@ jobs:
                   VERSION=$(node -e "console.log(require('./app.config.js').expo.version)")
                   COMMIT=$(git rev-parse --short HEAD)
                   APK_SRC=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
-                  APK_NAME="chatterui-${VERSION}-${COMMIT}.apk"
+                  if [[ -n "${{ github.event.pull_request.number }}" ]]; then
+                    APK_NAME="chatterui-pr${{ github.event.pull_request.number }}-${COMMIT}.apk"
+                  else
+                    APK_NAME="chatterui-${VERSION}-${COMMIT}.apk"
+                  fi
                   cp "$APK_SRC" "$APK_NAME"
                   echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
                   echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
