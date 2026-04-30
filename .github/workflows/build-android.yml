@@ -73,7 +73,6 @@ jobs:
                   org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError
                   org.gradle.parallel=true
                   org.gradle.configureondemand=true
-                  org.gradle.daemon=false
                   EOF
 
             - name: Install npm dependencies
@@ -91,15 +90,23 @@ jobs:
 
             # @vali98/* packages don't declare generateCodegenArtifactsFromSchema as a
             # dependency of the app's CMake step, so on a clean npm ci the JNI directories
-            # are missing and CMake fails with "not an existing directory". Run codegen for
-            # those packages explicitly before the main build.
-            - name: Generate codegen artifacts for @vali98 native modules
+            # are missing and CMake fails with "not an existing directory".
+            # Discover the exact Gradle project names dynamically (scoped npm packages
+            # like @vali98/foo may be registered under various names depending on the
+            # autolinking plugin version) and run all non-app codegen tasks up front.
+            - name: Generate codegen artifacts for native modules
               run: |
-                  cd android && ./gradlew \
-                    :react-native-cpu-info:generateCodegenArtifactsFromSchema \
-                    :react-native-png-utils:generateCodegenArtifactsFromSchema \
-                    :react-native-process-text:generateCodegenArtifactsFromSchema \
-                    -PreactNativeArchitectures=arm64-v8a
+                  cd android
+                  TASKS=$(./gradlew tasks --all 2>/dev/null \
+                    | grep ':generateCodegenArtifactsFromSchema' \
+                    | awk '{print $1}' \
+                    | grep -v '^:app:' \
+                    | tr '\n' ' ')
+                  if [ -n "$TASKS" ]; then
+                    echo "Pre-running codegen: $TASKS"
+                    # shellcheck disable=SC2086
+                    ./gradlew $TASKS -PreactNativeArchitectures=arm64-v8a
+                  fi
 
             - name: Build release APK (arm64-v8a)
               run: |
