@@ -63,14 +63,17 @@ jobs:
                   restore-keys: |
                       gradle-${{ runner.os }}-
 
-            # Give Gradle more heap; the llama.cpp native compilation is memory-hungry
+            # Keep JVM heap modest so the OS and CMake/NDK native compilation
+            # (which runs outside the JVM) have enough RAM on the 7 GB runner.
+            # llama.cpp compilation is the memory bottleneck, not Gradle itself.
             - name: Configure Gradle JVM memory
               run: |
                   mkdir -p ~/.gradle
                   cat >> ~/.gradle/gradle.properties <<'EOF'
-                  org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError
+                  org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError
                   org.gradle.parallel=true
                   org.gradle.configureondemand=true
+                  org.gradle.daemon=false
                   EOF
 
             - name: Install npm dependencies
@@ -86,9 +89,13 @@ jobs:
               run: |
                   echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > "${{ github.workspace }}/release.keystore"
 
-            - name: Build release APK
+            # Build arm64-v8a only. GitHub runners have 7 GB RAM; compiling
+            # llama.cpp for all 4 ABIs in parallel exhausts that. arm64-v8a
+            # covers every modern Android phone and is what users need.
+            - name: Build release APK (arm64-v8a)
               run: |
                   cd android && ./gradlew assembleRelease \
+                    -PreactNativeArchitectures=arm64-v8a \
                     -Pandroid.injected.signing.store.file="${{ github.workspace }}/release.keystore" \
                     -Pandroid.injected.signing.store.password="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
                     -Pandroid.injected.signing.key.alias="${{ secrets.ANDROID_KEY_ALIAS }}" \
